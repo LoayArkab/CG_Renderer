@@ -1,39 +1,30 @@
 """
-Software Renderer - Stage 4: loading real 3D models from .obj files.
+Software Renderer - Stage 5: filled triangles, back-face culling, painter's algorithm.
 
 Keys:
   W A S D   move          Q / E   down / up        Shift   move faster
   Arrows    look around   R       reset camera
   M  next model           Space   pause / resume rotation
+  F  render mode: wireframe / filled / filled + outline
+  B  back-face culling on / off
   P  perspective / orthographic      O  pyramid spin / orbit (shapes scene)
   C  save screenshot                 Esc quit
 """
 import os
-
+import time
 import numpy as np
 import pygame
 
 import math3d as m3
 from camera import Camera
-from obj_loader import load_obj
-from renderer import Framebuffer, draw_wireframe
+from obj_loader import load_obj, make_cube, make_pyramid
+from renderer import Framebuffer, draw_meshes_filled, draw_wireframe
 
 W, H = 320, 240
 SCALE = 3
 NEAR, FAR = 0.1, 100.0
 MODEL_FILES = ["models/suzanne.obj", "models/teapot.obj", "models/spot.obj"]
-
-CUBE_VERTS = np.array([
-    [-1, -1, -1], [1, -1, -1], [1, 1, -1], [-1, 1, -1],
-    [-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1],
-], dtype=float)
-CUBE_EDGES = [(0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6),
-              (6, 7), (7, 4), (0, 4), (1, 5), (2, 6), (3, 7)]
-
-PYRAMID_VERTS = np.array([
-    [-1, -1, -1], [1, -1, -1], [1, -1, 1], [-1, -1, 1], [0, 1.2, 0],
-], dtype=float)
-PYRAMID_EDGES = [(0, 1), (1, 2), (2, 3), (3, 0), (0, 4), (1, 4), (2, 4), (3, 4)]
+MODES = ["wireframe", "filled", "filled + outline"]
 
 
 def make_grid(size=10, y=-2.0):
@@ -55,6 +46,7 @@ def main():
     clock = pygame.time.Clock()
     fb = Framebuffer(W, H)
 
+    cube, pyramid = make_cube(), make_pyramid()
     meshes = [load_obj(path) for path in MODEL_FILES]
     for mesh in meshes:
         print("Loaded", mesh)
@@ -66,6 +58,8 @@ def main():
     use_perspective = True
     pyramid_orbits = False
     paused = False
+    mode = 1
+    cull = True
     camera = Camera(position=(0, 0, 6))
     shot = 0
 
@@ -90,10 +84,14 @@ def main():
                     scene = (scene + 1) % (len(meshes) + 1)
                 elif e.key == pygame.K_SPACE:
                     paused = not paused
+                elif e.key == pygame.K_f:
+                    mode = (mode + 1) % len(MODES)
+                elif e.key == pygame.K_b:
+                    cull = not cull
                 elif e.key == pygame.K_c:
                     os.makedirs("screenshots", exist_ok=True)
                     shot += 1
-                    pygame.image.save(window, f"screenshots/stage4_{shot}.png")
+                    pygame.image.save(window, f"screenshots/stage5_{shot}.png")
 
         camera.update(pygame.key.get_pressed(), dt)
         if not paused:
@@ -102,30 +100,38 @@ def main():
         proj = persp if use_perspective else ortho
         vp = proj @ camera.view_matrix()
 
-        fb.clear((10, 10, 20))
-        draw_wireframe(fb, GRID_VERTS, GRID_EDGES, vp, (40, 60, 90), NEAR)
-
+        # build the list of (mesh, model matrix) for this frame
         if scene == 0:
-            name, info = "shapes", ""
             cube_model = m3.translate(-1.8, 0, 0) @ m3.rotate_y(t) @ m3.rotate_x(t * 0.7)
             if pyramid_orbits:
                 pyr_model = m3.rotate_y(-t) @ m3.translate(1.8, 0, 0)
             else:
                 pyr_model = m3.translate(1.8, 0, 0) @ m3.rotate_y(-t)
-            draw_wireframe(fb, CUBE_VERTS, CUBE_EDGES, vp @ cube_model, (0, 255, 255), NEAR)
-            draw_wireframe(fb, PYRAMID_VERTS, PYRAMID_EDGES, vp @ pyr_model, (255, 140, 0), NEAR)
+            items = [(cube, cube_model), (pyramid, pyr_model)]
+            name = "shapes"
         else:
             mesh = meshes[scene - 1]
-            name = mesh.name
-            info = f" | {len(mesh.vertices)} v, {len(mesh.triangles)} tris"
-            model = m3.rotate_y(t * 0.5) @ m3.scale(1.8, 1.8, 1.8)
-            draw_wireframe(fb, mesh.vertices, mesh.edges, vp @ model, (0, 255, 160), NEAR)
+            items = [(mesh, m3.rotate_y(t * 0.5) @ m3.scale(1.8, 1.8, 1.8))]
+            name = f"{mesh.name} ({len(mesh.triangles)} tris)"
+
+        fb.clear((10, 10, 20))
+        draw_wireframe(fb, GRID_VERTS, GRID_EDGES, vp, (40, 60, 90), NEAR)
+
+        if mode == 0:
+            for mesh, model in items:
+                draw_wireframe(fb, mesh.vertices, mesh.edges, vp @ model, (0, 255, 160), NEAR)
+            stats = ""
+        else:
+            drawn, culled = draw_meshes_filled(fb, items, vp, NEAR, cull, outline=(mode == 2))
+            stats = f" | drawn {drawn}, culled {culled}"
 
         surf = pygame.surfarray.make_surface(fb.color)
         window.blit(pygame.transform.scale(surf, window.get_size()), (0, 0))
-        mode = "Persp" if use_perspective else "Ortho"
+        proj_name = "Persp" if use_perspective else "Ortho"
+        cull_name = "cull ON" if cull else "cull OFF"
         pygame.display.set_caption(
-            f"Stage 4 | {name}{info} | {mode} | {clock.get_fps():.0f} FPS")
+            f"Stage 5 | {name} | {MODES[mode]} | {cull_name}{stats} | "
+            f"{proj_name} | {clock.get_fps():.0f} FPS")
         pygame.display.flip()
 
     pygame.quit()

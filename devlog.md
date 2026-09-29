@@ -29,3 +29,12 @@
 - Models are centered and scaled to fit [-1, 1] so every model works with the same camera.
 - Performance: projecting all vertices in one numpy multiplication instead of per edge keeps the teapot (6,320 triangles, ~10,000 edges) interactive.
 - Added M to switch models and Space to pause rotation.
+
+## Stage 5: Filled triangles
+- Implemented triangle rasterization with edge functions: for each pixel center in the triangle's bounding box, test the sign of the three edge functions. numpy tests the whole box at once.
+- Back-face culling using the winding order (sign of the screen-space area). Culls about half the triangles (3,700 of 6,320 on the teapot).
+- Verified all models use counter-clockwise winding by computing their signed volume (positive = faces point outward).
+- Painter's algorithm: triangles from all objects sorted far-to-near by average depth.
+- Known failure: when the pyramid orbits through the cube, whole faces pop in front of each other, because no ordering of whole triangles is correct for intersecting objects. Needs per-pixel depth: z-buffer (next stage).
+- Debug colors per polygon using golden-ratio hue steps, since there is no lighting yet.
+- Screenshot shows the failure: small pink pyramid triangles drawn on top of the cube where the pyramid is actually inside it.

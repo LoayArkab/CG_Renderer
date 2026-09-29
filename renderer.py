@@ -100,3 +100,97 @@ def draw_wireframe(fb, vertices, edges, mvp, rgb, near):
         seg = m3.clip_segment_near(clip[a], clip[b], near)
         p0, p1 = m3.to_screen(np.array(seg), fb.w, fb.h)
         draw_line(fb, p0[0], p0[1], p1[0], p1[1], rgb)
+
+
+# ---------------------------------------------------------------------------
+# Stage 5: filled triangles
+# ---------------------------------------------------------------------------
+
+def edge_function(ax, ay, bx, by, px, py):
+    """Twice the signed area of triangle (A, B, P).
+    Its sign tells on which side of the line A->B the point P lies."""
+    return (bx - ax) * (py - ay) - (by - ay) * (px - ax)
+
+
+def fill_triangle(fb, x0, y0, x1, y1, x2, y2, rgb):
+    """Rasterize a triangle with the edge-function (barycentric) method.
+
+    1. Take the triangle's bounding box, clipped to the screen.
+    2. For the CENTER of every pixel in the box, evaluate the three edge functions.
+    3. The pixel is inside if all three have the same sign as the whole triangle.
+    numpy evaluates all pixels of the box at once instead of one by one.
+    """
+    xmin = max(int(np.floor(min(x0, x1, x2))), 0)
+    xmax = min(int(np.ceil(max(x0, x1, x2))), fb.w - 1)
+    ymin = max(int(np.floor(min(y0, y1, y2))), 0)
+    ymax = min(int(np.ceil(max(y0, y1, y2))), fb.h - 1)
+    if xmin > xmax or ymin > ymax:
+        return                                           # completely off-screen
+
+    area = edge_function(x0, y0, x1, y1, x2, y2)
+    if area == 0:
+        return                                           # degenerate (a line)
+
+    px = np.arange(xmin, xmax + 1)[:, None] + 0.5        # pixel centers, column
+    py = np.arange(ymin, ymax + 1)[None, :] + 0.5        # pixel centers, row
+    w0 = edge_function(x1, y1, x2, y2, px, py)           # (nx, ny) arrays
+    w1 = edge_function(x2, y2, x0, y0, px, py)
+    w2 = edge_function(x0, y0, x1, y1, px, py)
+
+    if area > 0:
+        inside = (w0 >= 0) & (w1 >= 0) & (w2 >= 0)
+    else:
+        inside = (w0 <= 0) & (w1 <= 0) & (w2 <= 0)
+
+    fb.color[xmin:xmax + 1, ymin:ymax + 1][inside] = rgb
+
+
+def draw_meshes_filled(fb, items, vp, near, cull=True, outline=False):
+    """Draw solid meshes with back-face culling and the PAINTER'S ALGORITHM.
+
+    items: list of (mesh, model_matrix).
+    Triangles from ALL meshes are collected, sorted far-to-near by their
+    average depth, and painted in that order so nearer ones cover farther ones.
+    Returns (triangles drawn, triangles culled).
+    """
+    import math3d as m3
+
+    all_pts, all_depth, all_col = [], [], []
+    culled = 0
+    for mesh, model in items:
+        clip = m3.transform_points(vp @ model, mesh.vertices)
+        scr = m3.to_screen(clip, fb.w, fb.h)[:, :2]
+        tri = mesh.triangles
+        w = clip[:, 3]
+
+        # simple near-plane handling: drop triangles with a corner behind the camera
+        keep = (w[tri] >= near).all(axis=1)
+
+        a, b, c = scr[tri[:, 0]], scr[tri[:, 1]], scr[tri[:, 2]]
+        # signed area on screen. Front faces are counter-clockwise in the
+        # y-up world, which becomes clockwise on the y-down screen -> negative.
+        signed = ((b[:, 0] - a[:, 0]) * (c[:, 1] - a[:, 1])
+                  - (b[:, 1] - a[:, 1]) * (c[:, 0] - a[:, 0]))
+        if cull:
+            front = signed < 0
+            culled += int((keep & ~front).sum())
+            keep &= front
+
+        all_pts.append(np.stack([a, b, c], axis=1)[keep])     # (k, 3, 2)
+        all_depth.append(w[tri].mean(axis=1)[keep])           # distance from camera
+        all_col.append(mesh.tri_colors[keep])
+
+    pts = np.concatenate(all_pts)
+    depth = np.concatenate(all_depth)
+    cols = np.concatenate(all_col)
+
+    order = np.argsort(-depth)                                 # farthest first
+    for (p0, p1, p2), col in zip(pts[order].tolist(), cols[order].tolist()):
+        fill_triangle(fb, p0[0], p0[1], p1[0], p1[1], p2[0], p2[1], col)
+        if outline:
+            dark = (20, 20, 30)
+            draw_line(fb, p0[0], p0[1], p1[0], p1[1], dark)
+            draw_line(fb, p1[0], p1[1], p2[0], p2[1], dark)
+            draw_line(fb, p2[0], p2[1], p0[0], p0[1], dark)
+
+    return len(order), culled

@@ -24,6 +24,8 @@ python -m venv .venv
 | R | Reset camera |
 | M | Switch model (shapes → Suzanne → teapot → Spot the cow) |
 | Space | Pause / resume the model rotation |
+| F | Render mode: wireframe / filled / filled + outline |
+| B | Back-face culling on / off |
 | P | Toggle perspective / orthographic projection |
 | O | Toggle the pyramid's transform order (spin in place / orbit) |
 | C | Save a screenshot to `screenshots/` |
@@ -37,7 +39,7 @@ python -m venv .venv
 | `math3d.py` | 4×4 matrices: translation, rotation, scaling, projection, viewport |
 | `renderer.py` | Framebuffer and rasterization algorithms (everything that writes pixels) |
 | `camera.py` | First-person fly camera: position, yaw, pitch, view matrix |
-| `obj_loader.py` | Wavefront .obj loader: indexed mesh, triangulation, edge extraction |
+| `obj_loader.py` | Mesh class, Wavefront .obj loader, triangulation, built-in cube and pyramid |
 | `models/` | Test models: Suzanne, the Utah teapot, Spot the cow |
 | `devlog.md` | Development log: problems found and how they were solved |
 
@@ -240,3 +242,65 @@ Projecting all vertices at once with numpy, and converting the result to plain P
 
 ---
 
+## Stage 5: Filled triangles
+
+### Why triangles
+Every polygon was already split into triangles in Stage 4. A triangle is the ideal primitive to fill: its three corners always lie in one plane, it is always convex, and it can never twist or overlap itself. This is why GPUs rasterize nothing but triangles.
+
+### The edge function
+For a directed edge from A to B and a point P:
+
+```
+E(A, B, P) = (Bx − Ax)·(Py − Ay) − (By − Ay)·(Px − Ax)
+```
+
+This is the 2D cross product of `B − A` and `P − A`. It equals **twice the signed area** of triangle (A, B, P): positive when P is on one side of the line A→B, negative on the other, and zero exactly on the line.
+
+A point P is inside triangle (V0, V1, V2) exactly when it is on the same side of all three edges:
+
+```
+w0 = E(V1, V2, P)     w1 = E(V2, V0, P)     w2 = E(V0, V1, P)
+inside  ⇔  w0, w1, w2 all have the same sign as the triangle's area E(V0, V1, V2)
+```
+
+These three values are also the **barycentric coordinates** of P (after dividing by the total area): each one is the relative area of the sub-triangle opposite a vertex, and they sum to 1. They will be used in the next stages to interpolate depth and color across the triangle.
+
+### The rasterization algorithm
+1. Compute the triangle's **bounding box** and clip it to the screen. Triangles completely off-screen are rejected immediately.
+2. Test the **center** of every pixel in the box (`x + 0.5, y + 0.5`). Sampling at centers means that two triangles sharing an edge divide the pixels between them without leaving gaps.
+3. Color the pixels that pass the inside test.
+
+This is the same approach GPUs use. It is used here instead of the scanline algorithm because every pixel's test is independent of the others: numpy evaluates the whole bounding box in a few array operations, just as a GPU tests many pixels in parallel. The scanline algorithm, by contrast, walks the triangle row by row and is naturally sequential.
+
+### Back-face culling
+For a closed object, the triangles facing away from the camera are always hidden behind the ones facing it, so they can be skipped without any visible change.
+
+The test uses **winding order**. The OBJ convention is that the corners of a face are listed counter-clockwise when viewed from outside the object. After projection, a front-facing triangle keeps that order on screen, and a back-facing one appears reversed (clockwise). So the sign of the triangle's screen-space area tells which way it faces, with no normals or 3D math needed. (Because screen y points down, counter-clockwise in the world shows up as a *negative* area on screen.)
+
+The winding of every model was verified by computing its signed volume from the triangles (the divergence theorem): a positive volume means all faces point outward.
+
+**Result:** about half of all triangles are discarded before rasterization. Key **B** turns culling off to compare; the window title shows how many triangles were drawn and culled.
+
+| Model | Triangles | Drawn with culling | Culled |
+|---|---|---|---|
+| Cube | 12 | 4–6 | 6–8 |
+| Suzanne | 968 | ~650 | ~320 |
+| Utah teapot | 6,320 | ~2,600 | ~3,700 |
+| Spot | 5,856 | ~2,800 | ~3,100 |
+
+(Suzanne keeps more because her eye sockets and ears contain faces that face the camera but are hidden, which culling cannot detect.)
+
+### The painter's algorithm (hidden surface removal, first attempt)
+Culling alone is not enough: on a non-convex shape (the teapot's handle and spout, Suzanne's ears) a front-facing triangle can still be hidden behind another front-facing one. The first solution used here is the **painter's algorithm**: the triangles of all objects are gathered in one list, sorted by their average distance from the camera (the clip-space `w`), and painted **from farthest to nearest**, so nearer triangles cover farther ones, the way a painter paints the background first.
+
+### Where the painter's algorithm fails
+Sorting whole triangles by one depth value is an approximation, and it visibly breaks in the shapes scene: press **O** so the pyramid orbits **through** the cube. When two objects intersect, part of a triangle is in front and part is behind, and no ordering of whole triangles can be correct. One object's faces pop in front of the other's all at once, instead of cutting through each other. The same problem happens with long triangles whose average depth is misleading, and with cyclic overlaps (A over B over C over A).
+
+The solution is to decide visibility **per pixel instead of per triangle**, which is the z-buffer, implemented in the next stage.
+
+### Colors in this stage
+There is no lighting yet, so a solid model with one color would be a flat silhouette. Each original polygon gets its own debug color, spaced around the hue wheel by the golden ratio (0.618…) so neighboring faces always look different. Both triangles of a quad share one color, so Suzanne's quads are visible as quads.
+
+---
+
+<!-- Later stages are added below -->
