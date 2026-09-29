@@ -46,3 +46,12 @@
 - Triangles no longer need sorting. Intersecting objects (pyramid orbiting through the cube) now show a clean intersection line. Key Z switches painter/z-buffer to compare.
 - Depth view: converts NDC z back to real distance (NDC z is very non-linear: ~90% of its range is used in the first metre with near=0.1, far=100) and shows it as grayscale.
 - Problem: the Stage 5 outlines were drawn on top with Bresenham, which would show hidden edges now that triangles aren't sorted. Fix: compute the outline inside the rasterizer (pixel distance to edge = |w| / edge length), after the depth test.
+
+## Stage 7: Lighting
+- Added vertex normals (area-weighted average of face normals) and a Blinn-Phong lighting model (lighting.py): ambient + diffuse (Lambert) + specular (half vector).
+- Three shading modes (key L): flat (per triangle), Gouraud (per vertex, colors interpolated), Phong (normals interpolated, lighting per pixel).
+- Added perspective-correct interpolation (interpolate value/w and 1/w, then divide), used for Gouraud colors and Phong normals.
+- Key K makes the light orbit: shows Gouraud's highlight jumping between vertices vs Phong's smooth highlight.
+- Changed the light direction to come more from the camera side; the first direction left most visible faces dark.
+- Noticed seams on the teapot: the OBJ duplicates vertices along patch borders, so normals don't match across them.
+- Phong is ~2x slower than Gouraud in pure Python (~4-5 FPS on the teapot).

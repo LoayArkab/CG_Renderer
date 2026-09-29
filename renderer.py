@@ -119,14 +119,16 @@ def edge_function(ax, ay, bx, by, px, py):
     return (bx - ax) * (py - ay) - (by - ay) * (px - ax)
 
 
-def fill_triangle(fb, v0, v1, v2, rgb, use_depth=True, outline=False):
+def fill_triangle(fb, v0, v1, v2, rgb=None, inv_w=None, attrs=None, shader=None,
+                  use_depth=True, outline=False):
     """Rasterize one triangle. Each vertex is (screen_x, screen_y, depth_z).
 
-    1. Bounding box of the triangle, clipped to the screen.
-    2. Edge functions at every pixel center -> barycentric coordinates (l0, l1, l2).
-    3. Inside test: all three barycentric coordinates >= 0.
-    4. Depth: z = l0*z0 + l1*z1 + l2*z2, compared against the z-buffer.
-    numpy processes all pixels of the bounding box at once.
+    Coloring, one of:
+      rgb             one color for the whole triangle (flat shading, debug colors)
+      attrs (3, k)    per-vertex values interpolated across the triangle
+                      (colors for Gouraud, normal+position for Phong);
+                      shader(values) turns interpolated values into colors.
+    inv_w: 1/w of each vertex, for perspective-correct interpolation of attrs.
     """
     (x0, y0, z0), (x1, y1, z1), (x2, y2, z2) = v0, v1, v2
 
@@ -143,26 +145,41 @@ def fill_triangle(fb, v0, v1, v2, rgb, use_depth=True, outline=False):
 
     px = np.arange(xmin, xmax + 1)[:, None] + 0.5        # pixel centers, column
     py = np.arange(ymin, ymax + 1)[None, :] + 0.5        # pixel centers, row
-    w0 = edge_function(x1, y1, x2, y2, px, py)           # (nx, ny) arrays
+    w0 = edge_function(x1, y1, x2, y2, px, py)
     w1 = edge_function(x2, y2, x0, y0, px, py)
     w2 = edge_function(x0, y0, x1, y1, px, py)
 
-    # barycentric coordinates: dividing by the signed area makes them
-    # positive inside the triangle whatever its orientation, and sum to 1
+    # screen-space barycentric coordinates (positive inside, sum to 1)
     l0, l1, l2 = w0 / area, w1 / area, w2 / area
     inside = (l0 >= 0) & (l1 >= 0) & (l2 >= 0)
 
-    color = fb.color[xmin:xmax + 1, ymin:ymax + 1]      # views into the buffers
+    color = fb.color[xmin:xmax + 1, ymin:ymax + 1]
     depth = fb.depth[xmin:xmax + 1, ymin:ymax + 1]
 
     if use_depth:
-        z = l0 * z0 + l1 * z1 + l2 * z2                 # interpolated depth
-        visible = inside & (z < depth)                   # THE depth test
-        depth[visible] = z[visible]                      # remember the new nearest
+        z = l0 * z0 + l1 * z1 + l2 * z2                  # NDC z is linear on screen
+        visible = inside & (z < depth)                   # the depth test
+        depth[visible] = z[visible]
     else:
         visible = inside
+    if not visible.any():
+        return
 
-    color[visible] = rgb
+    if attrs is None:
+        color[visible] = rgb
+    else:
+        # perspective-correct interpolation: interpolate attr/w and 1/w
+        # linearly on screen, then divide. (Plain screen-space weights
+        # would stretch values toward the far part of the triangle.)
+        a0 = l0[visible] * inv_w[0]
+        a1 = l1[visible] * inv_w[1]
+        a2 = l2[visible] * inv_w[2]
+        weights = np.stack([a0, a1, a2], axis=1)
+        weights /= weights.sum(axis=1, keepdims=True)
+        values = weights @ attrs                          # (pixels, k)
+        if shader is not None:
+            values = shader(values)
+        color[visible] = np.clip(values, 0, 255)
 
     if outline:
         # distance (in pixels) from each pixel to each edge = |w| / edge length
@@ -173,54 +190,82 @@ def fill_triangle(fb, v0, v1, v2, rgb, use_depth=True, outline=False):
         color[near_edge] = OUTLINE_COLOR
 
 
-def draw_meshes_filled(fb, items, vp, near, cull=True, outline=False, use_zbuffer=True):
-    """Draw solid meshes with back-face culling and hidden surface removal.
+def draw_meshes_filled(fb, items, vp, near, cull=True, outline=False, use_zbuffer=True,
+                       shading="phong", camera_pos=(0, 0, 0), light_dir=(0, 1, 0)):
+    """Draw solid meshes with culling, hidden surface removal and lighting.
 
     items: list of (mesh, model_matrix).
-    use_zbuffer=False -> painter's algorithm (sort whole triangles far-to-near)
-    use_zbuffer=True  -> z-buffer (per-pixel depth test, any order works)
+    shading: "faces"   one debug color per polygon (no lighting)
+             "flat"    one lit color per triangle, from the face normal
+             "gouraud" lighting computed at the vertices, colors interpolated
+             "phong"   normals interpolated, lighting computed at every pixel
     Returns (triangles drawn, triangles culled).
     """
     import math3d as m3
+    from lighting import blinn_phong
 
-    all_verts, all_depth, all_col = [], [], []
+    jobs = []            # (depth, screen verts, kwargs for fill_triangle)
     culled = 0
     for mesh, model in items:
         clip = m3.transform_points(vp @ model, mesh.vertices)
-        scr = m3.to_screen(clip, fb.w, fb.h)            # (x, y, z_ndc) per vertex
+        scr = m3.to_screen(clip, fb.w, fb.h)
         tri = mesh.triangles
         w = clip[:, 3]
 
-        # simple near-plane handling: drop triangles with a corner behind the camera
         keep = (w[tri] >= near).all(axis=1)
-
         a, b, c = scr[tri[:, 0]], scr[tri[:, 1]], scr[tri[:, 2]]
-        # signed screen area; front faces (CCW in the y-up world) are
-        # clockwise on the y-down screen -> negative area
         signed = ((b[:, 0] - a[:, 0]) * (c[:, 1] - a[:, 1])
                   - (b[:, 1] - a[:, 1]) * (c[:, 0] - a[:, 0]))
         if cull:
             front = signed < 0
             culled += int((keep & ~front).sum())
             keep &= front
+        idx = np.nonzero(keep)[0]
+        if len(idx) == 0:
+            continue
 
-        all_verts.append(np.stack([a, b, c], axis=1)[keep])   # (k, 3, 3)
-        all_depth.append(w[tri].mean(axis=1)[keep])
-        all_col.append(mesh.tri_colors[keep])
+        # lighting happens in WORLD space
+        world = m3.transform_points(model, mesh.vertices)[:, :3]
+        # normals: rotate with the model's 3x3 part (fine for rotation and
+        # uniform scale; non-uniform scale would need the inverse transpose)
+        normals = mesh.vertex_normals @ model[:3, :3].T
+        t = tri[idx]
+        screen_tris = np.stack([a[idx], b[idx], c[idx]], axis=1).tolist()
+        tri_depth = w[t].mean(axis=1).tolist()
+        inv_w = (1.0 / w[t]).tolist()
 
-    verts = np.concatenate(all_verts)
-    cols = np.concatenate(all_col)
+        if shading == "faces":
+            per_tri = [dict(rgb=tuple(col)) for col in mesh.tri_colors[idx].tolist()]
+        elif shading == "flat":
+            wa, wb, wc = world[t[:, 0]], world[t[:, 1]], world[t[:, 2]]
+            face_n = np.cross(wb - wa, wc - wa)
+            centers = (wa + wb + wc) / 3
+            cols = blinn_phong(face_n, centers, mesh.base_color, camera_pos, light_dir)
+            per_tri = [dict(rgb=tuple(int(v) for v in col)) for col in cols.tolist()]
+        elif shading == "gouraud":
+            vcols = blinn_phong(normals, world, mesh.base_color, camera_pos, light_dir)
+            tri_cols = vcols[t]                                  # (k, 3 corners, 3)
+            per_tri = [dict(attrs=tc, inv_w=iw) for tc, iw in zip(tri_cols, inv_w)]
+        else:  # phong
+            base = mesh.base_color
 
-    if use_zbuffer:
-        order = np.arange(len(verts))                    # order does not matter
-    else:
-        depth = np.concatenate(all_depth)
-        order = np.argsort(-depth)                       # painter: farthest first
+            def shader(values, base=base):
+                return blinn_phong(values[:, :3], values[:, 3:], base, camera_pos, light_dir)
 
-    for (v0, v1, v2), col in zip(verts[order].tolist(), cols[order].tolist()):
-        fill_triangle(fb, v0, v1, v2, col, use_zbuffer, outline)
+            tri_attrs = np.concatenate([normals[t], world[t]], axis=2)   # (k, 3, 6)
+            per_tri = [dict(attrs=ta, inv_w=iw, shader=shader)
+                       for ta, iw in zip(tri_attrs, inv_w)]
 
-    return len(order), culled
+        for d, sv, kw in zip(tri_depth, screen_tris, per_tri):
+            jobs.append((d, sv, kw))
+
+    if not use_zbuffer:
+        jobs.sort(key=lambda job: -job[0])        # painter: farthest first
+
+    for _, (v0, v1, v2), kw in jobs:
+        fill_triangle(fb, v0, v1, v2, use_depth=use_zbuffer, outline=outline, **kw)
+
+    return len(jobs), culled
 
 
 def depth_to_image(fb, near, far, perspective=True):

@@ -26,6 +26,8 @@ python -m venv .venv
 | Space | Pause / resume the model rotation |
 | F | Render mode: wireframe / filled / filled + outline / depth view |
 | Z | Hidden surface removal: z-buffer / painter's algorithm |
+| L | Shading: face colors / flat / Gouraud / Phong |
+| K | Make the light orbit around the scene (on / off) |
 | B | Back-face culling on / off |
 | P | Toggle perspective / orthographic projection |
 | O | Toggle the pyramid's transform order (spin in place / orbit) |
@@ -40,6 +42,7 @@ python -m venv .venv
 | `math3d.py` | 4×4 matrices: translation, rotation, scaling, projection, viewport |
 | `renderer.py` | Framebuffer and rasterization algorithms (everything that writes pixels) |
 | `camera.py` | First-person fly camera: position, yaw, pitch, view matrix |
+| `lighting.py` | Blinn-Phong reflection model (ambient, diffuse, specular) |
 | `obj_loader.py` | Mesh class, Wavefront .obj loader, triangulation, built-in cube and pyramid |
 | `models/` | Test models: Suzanne, the Utah teapot, Spot the cow |
 | `devlog.md` | Development log: problems found and how they were solved |
@@ -371,6 +374,62 @@ Key **Z** switches between the two methods live. The difference is clearest in t
 | Intersecting objects | wrong | correct |
 | Extra memory | none | one depth value per pixel |
 | Extra work | sort T triangles | one comparison per covered pixel |
+
+---
+
+## Stage 7: Lighting and shading
+
+![Flat, Gouraud and Phong shading](screenshots/stage7_shading_comparison.png)
+*Left to right: flat, Gouraud and Phong shading, rendered by this project.*
+
+### Normals
+Lighting depends on which way a surface faces, described by its **normal**: a unit vector perpendicular to the surface.
+
+- **Face normal:** for a triangle (A, B, C) listed counter-clockwise, `N = (B − A) × (C − A)` points out of the front side. This is the same winding convention used for back-face culling in Stage 5.
+- **Vertex normal:** the average of the normals of all faces around a vertex. The raw cross product's length is twice the triangle's area, so summing the un-normalized face normals weights big faces more than thin slivers, which gives smoother results. The result is normalized at the end. This is computed once when a model is loaded.
+
+Normals are transformed to world space with the 3×3 part of the model matrix. That is correct for rotations and uniform scaling, which is all this project uses. With non-uniform scaling, normals must be transformed by the **inverse transpose** of that matrix, otherwise they stop being perpendicular to the surface.
+
+### The Blinn-Phong reflection model
+The light is a directional light (like the sun): every point receives light from the same direction `L`. The color of a point combines three terms:
+
+```
+color = base · (ambient + kd · max(N·L, 0))  +  white · ks · max(N·H, 0)^shininess
+```
+
+- **Ambient** (0.15): a small constant, so surfaces facing away from the light are dark but not pure black. It stands in for light bouncing off other objects.
+- **Diffuse** (Lambert's cosine law): a matte surface receives energy proportional to the cosine of the angle between its normal and the light, `N·L`. It looks the same from every viewing angle. Negative values (facing away) are clamped to 0.
+- **Specular**: the shiny highlight. It depends on the viewer: `V` points from the surface to the camera and `H = normalize(L + V)` is the **half vector** halfway between light and viewer. The highlight is brightest when the normal lines up with H. Raising `N·H` to a power (the shininess, 32 here) makes the highlight small and sharp. It is white, since highlights reflect the color of the light, not the surface.
+
+Blinn-Phong uses the half vector instead of Phong's original reflection vector `R = 2(N·L)N − L`, because H is cheaper to compute and behaves better at grazing angles. It is the model OpenGL used for its fixed-function lighting.
+
+Lighting is calculated in **world space**, where the light direction and the camera position are both known. Key **K** makes the light orbit around the scene, so the highlights and shadows can be seen moving across the surface.
+
+### Three ways to apply the model (key L)
+The same lighting formula gives very different pictures depending on **where** it is evaluated.
+
+**Flat shading.** The formula is evaluated once per triangle, using the face normal at the triangle's center. Every triangle has one color, so the individual facets are clearly visible. It is the cheapest method.
+
+**Gouraud shading (1971).** The formula is evaluated once per **vertex**, using the smooth vertex normals, and the resulting colors are interpolated across the triangle with the barycentric coordinates. The model looks smooth, at almost the same cost as flat shading. Its weakness is the specular highlight: if a highlight falls in the middle of a triangle, none of the three vertices sees it, so it can disappear or appear smeared along the triangle's edges.
+
+**Phong shading (1975).** The **normal** (and the world position) are interpolated across the triangle instead of the color, and the full lighting formula is evaluated at **every pixel**, with the interpolated normal re-normalized first. Highlights are round and sharp and appear wherever they belong, independent of the mesh. It is the most expensive: in pure Python it runs at roughly half the frame rate of Gouraud on the teapot. This per-pixel approach is what GPU fragment shaders do today.
+
+The difference is easiest to see on the teapot with key **K** on: with Gouraud the highlight jumps between vertices, with Phong it slides smoothly across the surface.
+
+### Perspective-correct interpolation
+The barycentric coordinates from the rasterizer are measured on the **screen**. Because of the perspective divide, equal steps on screen do not correspond to equal steps on the 3D triangle: the far half of a triangle is squeezed into fewer pixels. Interpolating colors or normals with screen weights directly would distort them. (Depth did not have this problem, because NDC z is itself linear on screen.)
+
+The fix: a value divided by `w`, and `1/w` itself, *are* linear on screen. So for each pixel:
+
+```
+weight_i = λ_i / w_i
+value    = Σ weight_i · value_i  /  Σ weight_i
+```
+
+This is applied to the Gouraud colors and to the Phong normals and positions. It is the same correction GPUs apply to every interpolated attribute, and it matters most for large triangles viewed at an angle, for example the floor of a room or a texture.
+
+### Visible seams on the teapot
+The teapot shows a few sharp lines across its smooth body. They come from the model file itself: the teapot was built from separate Bézier patches, and the OBJ file repeats the vertices along patch boundaries instead of sharing them. The duplicated vertices each get a normal averaged only from their own side, so the normals do not match across the seam. Merging vertices with the same position before computing normals would remove them. The same mechanism is used on purpose in modeling tools, where duplicating vertices along an edge creates a deliberate **hard edge** (e.g. the edges of the cube, which Gouraud and Phong otherwise round off, since each cube corner averages three very different face normals).
 
 ---
 

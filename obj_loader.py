@@ -7,6 +7,7 @@ A mesh is stored the standard way (an "indexed face set"):
   face_ids : (T,)   which original polygon each triangle came from
   edges    : (E, 2) int array of unique edges (for wireframe drawing)
   face_colors: (F, 3) one debug color per original polygon
+  vertex_normals: (N, 3) smooth normal at each vertex (for Gouraud / Phong)
 """
 import colorsys
 import os
@@ -23,10 +24,31 @@ class Mesh:
         self.edges = edges
         self.face_colors = face_colors
         self.tri_colors = face_colors[face_ids]      # color of every triangle
+        self.vertex_normals = compute_vertex_normals(vertices, triangles)
+        self.base_color = (200, 200, 200)            # material color for lighting
 
     def __repr__(self):
         return (f"Mesh({self.name}: {len(self.vertices)} vertices, "
                 f"{len(self.triangles)} triangles, {len(self.edges)} edges)")
+
+
+def compute_vertex_normals(vertices, triangles):
+    """Smooth vertex normals: the average of the normals of all faces
+    around each vertex, weighted by face area.
+
+    cross(B - A, C - A) points out of a counter-clockwise triangle and its
+    length is twice the triangle's area, so summing the raw cross products
+    gives the area weighting for free: big faces count more than slivers.
+    """
+    a = vertices[triangles[:, 0]]
+    b = vertices[triangles[:, 1]]
+    c = vertices[triangles[:, 2]]
+    face_n = np.cross(b - a, c - a)
+    normals = np.zeros_like(vertices)
+    for k in range(3):                         # add each face normal to its 3 corners
+        np.add.at(normals, triangles[:, k], face_n)
+    length = np.linalg.norm(normals, axis=1, keepdims=True)
+    return normals / np.where(length == 0, 1, length)
 
 
 def debug_colors(n):
