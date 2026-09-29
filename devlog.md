@@ -38,3 +38,11 @@
 - Known failure: when the pyramid orbits through the cube, whole faces pop in front of each other, because no ordering of whole triangles is correct for intersecting objects. Needs per-pixel depth: z-buffer (next stage).
 - Debug colors per polygon using golden-ratio hue steps, since there is no lighting yet.
 - Screenshot shows the failure: small pink pyramid triangles drawn on top of the cube where the pyramid is actually inside it.
+
+## Stage 6: Z-buffer
+- Added a depth buffer next to the color buffer, cleared to infinity every frame.
+- Depth is interpolated per pixel with barycentric coordinates (edge functions divided by the signed area): z = l0*z0 + l1*z1 + l2*z2.
+- Stored NDC z because it is linear in screen space after the perspective divide, so screen-space interpolation is exact.
+- Triangles no longer need sorting. Intersecting objects (pyramid orbiting through the cube) now show a clean intersection line. Key Z switches painter/z-buffer to compare.
+- Depth view: converts NDC z back to real distance (NDC z is very non-linear: ~90% of its range is used in the first metre with near=0.1, far=100) and shows it as grayscale.
+- Problem: the Stage 5 outlines were drawn on top with Bresenham, which would show hidden edges now that triangles aren't sorted. Fix: compute the outline inside the rasterizer (pixel distance to edge = |w| / edge length), after the depth test.

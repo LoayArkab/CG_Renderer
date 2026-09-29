@@ -11,9 +11,12 @@ class Framebuffer:
         self.w, self.h = w, h
         # pygame.surfarray expects shape (width, height, 3), indexed [x, y]
         self.color = np.zeros((w, h, 3), dtype=np.uint8)
+        # z-buffer: depth of the nearest surface drawn so far at each pixel
+        self.depth = np.full((w, h), np.inf)
 
     def clear(self, rgb=(0, 0, 0)):
         self.color[:] = rgb
+        self.depth[:] = np.inf          # "nothing drawn yet" = infinitely far
 
     def put(self, x, y, rgb):
         if 0 <= x < self.w and 0 <= y < self.h:
@@ -103,8 +106,12 @@ def draw_wireframe(fb, vertices, edges, mvp, rgb, near):
 
 
 # ---------------------------------------------------------------------------
-# Stage 5: filled triangles
+# Stages 5-6: filled triangles, painter's algorithm and the z-buffer
 # ---------------------------------------------------------------------------
+
+OUTLINE_COLOR = (20, 20, 30)
+OUTLINE_WIDTH = 0.8        # in pixels
+
 
 def edge_function(ax, ay, bx, by, px, py):
     """Twice the signed area of triangle (A, B, P).
@@ -112,14 +119,17 @@ def edge_function(ax, ay, bx, by, px, py):
     return (bx - ax) * (py - ay) - (by - ay) * (px - ax)
 
 
-def fill_triangle(fb, x0, y0, x1, y1, x2, y2, rgb):
-    """Rasterize a triangle with the edge-function (barycentric) method.
+def fill_triangle(fb, v0, v1, v2, rgb, use_depth=True, outline=False):
+    """Rasterize one triangle. Each vertex is (screen_x, screen_y, depth_z).
 
-    1. Take the triangle's bounding box, clipped to the screen.
-    2. For the CENTER of every pixel in the box, evaluate the three edge functions.
-    3. The pixel is inside if all three have the same sign as the whole triangle.
-    numpy evaluates all pixels of the box at once instead of one by one.
+    1. Bounding box of the triangle, clipped to the screen.
+    2. Edge functions at every pixel center -> barycentric coordinates (l0, l1, l2).
+    3. Inside test: all three barycentric coordinates >= 0.
+    4. Depth: z = l0*z0 + l1*z1 + l2*z2, compared against the z-buffer.
+    numpy processes all pixels of the bounding box at once.
     """
+    (x0, y0, z0), (x1, y1, z1), (x2, y2, z2) = v0, v1, v2
+
     xmin = max(int(np.floor(min(x0, x1, x2))), 0)
     xmax = min(int(np.ceil(max(x0, x1, x2))), fb.w - 1)
     ymin = max(int(np.floor(min(y0, y1, y2))), 0)
@@ -137,29 +147,47 @@ def fill_triangle(fb, x0, y0, x1, y1, x2, y2, rgb):
     w1 = edge_function(x2, y2, x0, y0, px, py)
     w2 = edge_function(x0, y0, x1, y1, px, py)
 
-    if area > 0:
-        inside = (w0 >= 0) & (w1 >= 0) & (w2 >= 0)
+    # barycentric coordinates: dividing by the signed area makes them
+    # positive inside the triangle whatever its orientation, and sum to 1
+    l0, l1, l2 = w0 / area, w1 / area, w2 / area
+    inside = (l0 >= 0) & (l1 >= 0) & (l2 >= 0)
+
+    color = fb.color[xmin:xmax + 1, ymin:ymax + 1]      # views into the buffers
+    depth = fb.depth[xmin:xmax + 1, ymin:ymax + 1]
+
+    if use_depth:
+        z = l0 * z0 + l1 * z1 + l2 * z2                 # interpolated depth
+        visible = inside & (z < depth)                   # THE depth test
+        depth[visible] = z[visible]                      # remember the new nearest
     else:
-        inside = (w0 <= 0) & (w1 <= 0) & (w2 <= 0)
+        visible = inside
 
-    fb.color[xmin:xmax + 1, ymin:ymax + 1][inside] = rgb
+    color[visible] = rgb
+
+    if outline:
+        # distance (in pixels) from each pixel to each edge = |w| / edge length
+        d0 = np.abs(w0) / np.hypot(x2 - x1, y2 - y1)
+        d1 = np.abs(w1) / np.hypot(x0 - x2, y0 - y2)
+        d2 = np.abs(w2) / np.hypot(x1 - x0, y1 - y0)
+        near_edge = visible & (np.minimum(np.minimum(d0, d1), d2) < OUTLINE_WIDTH)
+        color[near_edge] = OUTLINE_COLOR
 
 
-def draw_meshes_filled(fb, items, vp, near, cull=True, outline=False):
-    """Draw solid meshes with back-face culling and the PAINTER'S ALGORITHM.
+def draw_meshes_filled(fb, items, vp, near, cull=True, outline=False, use_zbuffer=True):
+    """Draw solid meshes with back-face culling and hidden surface removal.
 
     items: list of (mesh, model_matrix).
-    Triangles from ALL meshes are collected, sorted far-to-near by their
-    average depth, and painted in that order so nearer ones cover farther ones.
+    use_zbuffer=False -> painter's algorithm (sort whole triangles far-to-near)
+    use_zbuffer=True  -> z-buffer (per-pixel depth test, any order works)
     Returns (triangles drawn, triangles culled).
     """
     import math3d as m3
 
-    all_pts, all_depth, all_col = [], [], []
+    all_verts, all_depth, all_col = [], [], []
     culled = 0
     for mesh, model in items:
         clip = m3.transform_points(vp @ model, mesh.vertices)
-        scr = m3.to_screen(clip, fb.w, fb.h)[:, :2]
+        scr = m3.to_screen(clip, fb.w, fb.h)            # (x, y, z_ndc) per vertex
         tri = mesh.triangles
         w = clip[:, 3]
 
@@ -167,8 +195,8 @@ def draw_meshes_filled(fb, items, vp, near, cull=True, outline=False):
         keep = (w[tri] >= near).all(axis=1)
 
         a, b, c = scr[tri[:, 0]], scr[tri[:, 1]], scr[tri[:, 2]]
-        # signed area on screen. Front faces are counter-clockwise in the
-        # y-up world, which becomes clockwise on the y-down screen -> negative.
+        # signed screen area; front faces (CCW in the y-up world) are
+        # clockwise on the y-down screen -> negative area
         signed = ((b[:, 0] - a[:, 0]) * (c[:, 1] - a[:, 1])
                   - (b[:, 1] - a[:, 1]) * (c[:, 0] - a[:, 0]))
         if cull:
@@ -176,21 +204,41 @@ def draw_meshes_filled(fb, items, vp, near, cull=True, outline=False):
             culled += int((keep & ~front).sum())
             keep &= front
 
-        all_pts.append(np.stack([a, b, c], axis=1)[keep])     # (k, 3, 2)
-        all_depth.append(w[tri].mean(axis=1)[keep])           # distance from camera
+        all_verts.append(np.stack([a, b, c], axis=1)[keep])   # (k, 3, 3)
+        all_depth.append(w[tri].mean(axis=1)[keep])
         all_col.append(mesh.tri_colors[keep])
 
-    pts = np.concatenate(all_pts)
-    depth = np.concatenate(all_depth)
+    verts = np.concatenate(all_verts)
     cols = np.concatenate(all_col)
 
-    order = np.argsort(-depth)                                 # farthest first
-    for (p0, p1, p2), col in zip(pts[order].tolist(), cols[order].tolist()):
-        fill_triangle(fb, p0[0], p0[1], p1[0], p1[1], p2[0], p2[1], col)
-        if outline:
-            dark = (20, 20, 30)
-            draw_line(fb, p0[0], p0[1], p1[0], p1[1], dark)
-            draw_line(fb, p1[0], p1[1], p2[0], p2[1], dark)
-            draw_line(fb, p2[0], p2[1], p0[0], p0[1], dark)
+    if use_zbuffer:
+        order = np.arange(len(verts))                    # order does not matter
+    else:
+        depth = np.concatenate(all_depth)
+        order = np.argsort(-depth)                       # painter: farthest first
+
+    for (v0, v1, v2), col in zip(verts[order].tolist(), cols[order].tolist()):
+        fill_triangle(fb, v0, v1, v2, col, use_zbuffer, outline)
 
     return len(order), culled
+
+
+def depth_to_image(fb, near, far, perspective=True):
+    """Turn the z-buffer into a grayscale picture: near = white, far = dark."""
+    z = fb.depth
+    hit = np.isfinite(z)
+    image = np.zeros((fb.w, fb.h, 3), dtype=np.uint8)
+    if not hit.any():
+        fb.color[:] = image
+        return
+    zn = z[hit]
+    if perspective:
+        # NDC depth is NOT linear in distance; convert back to eye-space distance
+        dist = 2 * near * far / (far + near - zn * (far - near))
+    else:
+        dist = zn                                        # orthographic depth is linear
+    lo, hi = dist.min(), dist.max()
+    t = (dist - lo) / (hi - lo) if hi > lo else np.zeros_like(dist)
+    gray = (255 - 200 * t).astype(np.uint8)              # 255 (near) .. 55 (far)
+    image[hit] = gray[:, None]
+    fb.color[:] = image

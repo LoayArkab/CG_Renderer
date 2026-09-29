@@ -24,11 +24,12 @@ python -m venv .venv
 | R | Reset camera |
 | M | Switch model (shapes → Suzanne → teapot → Spot the cow) |
 | Space | Pause / resume the model rotation |
-| F | Render mode: wireframe / filled / filled + outline |
+| F | Render mode: wireframe / filled / filled + outline / depth view |
+| Z | Hidden surface removal: z-buffer / painter's algorithm |
 | B | Back-face culling on / off |
 | P | Toggle perspective / orthographic projection |
 | O | Toggle the pyramid's transform order (spin in place / orbit) |
-| C | Save a screenshot to `screenshots/` |
+| C | Save a screenshot to `screenshots/` (named by time) |
 | Esc | Quit |
 
 ## Project structure
@@ -300,6 +301,76 @@ The solution is to decide visibility **per pixel instead of per triangle**, whic
 
 ### Colors in this stage
 There is no lighting yet, so a solid model with one color would be a flat silhouette. Each original polygon gets its own debug color, spaced around the hue wheel by the golden ratio (0.618…) so neighboring faces always look different. Both triangles of a quad share one color, so Suzanne's quads are visible as quads.
+
+---
+
+## Stage 6: The z-buffer
+
+### The idea
+The painter's algorithm decides visibility **per triangle**, and Stage 5 showed that this cannot be correct when objects intersect. The z-buffer (depth buffer) decides visibility **per pixel** instead.
+
+Next to the color buffer, the framebuffer now holds a second array of the same size, `depth`, storing for every pixel the depth of the nearest surface drawn there so far. At the start of each frame it is filled with infinity ("nothing drawn yet"). Then, for every pixel a triangle covers:
+
+```
+z = depth of the triangle at this pixel
+if z < depth_buffer[x, y]:          # nearer than anything drawn here before?
+    depth_buffer[x, y] = z          # remember it
+    color_buffer[x, y] = color      # and draw it
+else:
+    discard                         # hidden behind something already drawn
+```
+
+Because every pixel is resolved independently, the triangles can be drawn **in any order**: no sorting is needed at all, and intersecting objects are handled exactly. This is the method every GPU uses.
+
+### Interpolating depth with barycentric coordinates
+The rasterizer from Stage 5 already computes the edge functions `w0, w1, w2` for each pixel. Dividing them by the triangle's signed area gives the **barycentric coordinates**:
+
+```
+λ0 = w0 / area,   λ1 = w1 / area,   λ2 = w2 / area,     λ0 + λ1 + λ2 = 1
+```
+
+Each λ says how much each corner "contributes" to the pixel, so the depth at the pixel is the weighted average of the corner depths:
+
+```
+z = λ0·z0 + λ1·z1 + λ2·z2
+```
+
+Dividing by the *signed* area also simplified the inside test: all three λ are non-negative inside the triangle, whatever the winding of the triangle on screen.
+
+### Which depth value to store
+The value interpolated is the **NDC z** produced by the projection matrix and the divide by w. This choice matters: after the perspective divide, NDC z is a linear function of the screen x and y, so interpolating it with screen-space barycentric coordinates is exact. (Eye-space distance is *not* linear across the screen after perspective projection, so interpolating it this way would give slightly wrong depths.)
+
+### Depth precision is not uniform
+NDC z is related to the real distance d by roughly `z ≈ A − B/d`: it changes very quickly close to the camera and very slowly far away. With near = 0.1 and far = 100, about 90% of the whole depth range is used for the first metre in front of the camera. This is why real engines keep the near plane as far out as possible: a near plane that is too small causes **z-fighting**, where two surfaces far from the camera get the same stored depth and flicker.
+
+### Depth view (key F)
+The "depth view" mode displays the z-buffer itself as a grayscale image (near = white, far = dark). Because of the non-uniform precision above, showing NDC z directly would make everything look almost the same light gray. So the stored value is first converted back to real distance:
+
+```
+d = 2·near·far / (far + near − z·(far − near))
+```
+
+and then stretched between the nearest and farthest visible pixel. In orthographic mode NDC z is already linear in distance, so no conversion is needed.
+
+### Outlines that respect depth
+In Stage 5 the outline mode drew triangle edges with Bresenham on top of the fill. With the z-buffer, triangles are no longer drawn back to front, so those lines would show edges of hidden triangles through the surface. Instead, the outline is now computed **inside the triangle rasterizer**: the distance from a pixel to an edge is its edge function divided by the edge length,
+
+```
+distance_to_edge_i = |w_i| / length(edge_i)
+```
+
+and visible pixels closer than 0.8 px to any edge are colored dark. Since this happens after the depth test, only edges of visible surfaces are drawn. (This is the same idea as the "barycentric wireframe" shader technique used on GPUs.)
+
+### Painter's algorithm vs. z-buffer
+Key **Z** switches between the two methods live. The difference is clearest in the shapes scene with the orbiting pyramid (key **O**): with the painter's algorithm, the pyramid's faces pop in front of or behind the cube as whole triangles; with the z-buffer, the two objects cut through each other with a clean, pixel-exact intersection line.
+
+| | Painter's algorithm | Z-buffer |
+|---|---|---|
+| Visibility decided | per triangle | per pixel |
+| Needs sorting | yes, every frame | no |
+| Intersecting objects | wrong | correct |
+| Extra memory | none | one depth value per pixel |
+| Extra work | sort T triangles | one comparison per covered pixel |
 
 ---
 

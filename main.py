@@ -1,30 +1,32 @@
 """
-Software Renderer - Stage 5: filled triangles, back-face culling, painter's algorithm.
+Software Renderer - Stage 6: the z-buffer.
 
 Keys:
   W A S D   move          Q / E   down / up        Shift   move faster
   Arrows    look around   R       reset camera
   M  next model           Space   pause / resume rotation
-  F  render mode: wireframe / filled / filled + outline
+  F  render mode: wireframe / filled / filled + outline / depth view
+  Z  hidden surfaces: z-buffer / painter's algorithm
   B  back-face culling on / off
   P  perspective / orthographic      O  pyramid spin / orbit (shapes scene)
   C  save screenshot                 Esc quit
 """
 import os
 import time
+
 import numpy as np
 import pygame
 
 import math3d as m3
 from camera import Camera
 from obj_loader import load_obj, make_cube, make_pyramid
-from renderer import Framebuffer, draw_meshes_filled, draw_wireframe
+from renderer import Framebuffer, depth_to_image, draw_meshes_filled, draw_wireframe
 
 W, H = 320, 240
 SCALE = 3
 NEAR, FAR = 0.1, 100.0
 MODEL_FILES = ["models/suzanne.obj", "models/teapot.obj", "models/spot.obj"]
-MODES = ["wireframe", "filled", "filled + outline"]
+MODES = ["wireframe", "filled", "filled + outline", "depth view"]
 
 
 def make_grid(size=10, y=-2.0):
@@ -60,8 +62,8 @@ def main():
     paused = False
     mode = 1
     cull = True
+    use_zbuffer = True
     camera = Camera(position=(0, 0, 6))
-    shot = 0
 
     t = 0.0
     running = True
@@ -86,12 +88,14 @@ def main():
                     paused = not paused
                 elif e.key == pygame.K_f:
                     mode = (mode + 1) % len(MODES)
+                elif e.key == pygame.K_z:
+                    use_zbuffer = not use_zbuffer
                 elif e.key == pygame.K_b:
                     cull = not cull
                 elif e.key == pygame.K_c:
                     os.makedirs("screenshots", exist_ok=True)
-                    shot += 1
-                    pygame.image.save(window, f"screenshots/stage5_{shot}.png")
+                    pygame.image.save(
+                        window, f"screenshots/stage6_{time.strftime('%H%M%S')}.png")
 
         camera.update(pygame.key.get_pressed(), dt)
         if not paused:
@@ -100,7 +104,6 @@ def main():
         proj = persp if use_perspective else ortho
         vp = proj @ camera.view_matrix()
 
-        # build the list of (mesh, model matrix) for this frame
         if scene == 0:
             cube_model = m3.translate(-1.8, 0, 0) @ m3.rotate_y(t) @ m3.rotate_x(t * 0.7)
             if pyramid_orbits:
@@ -115,22 +118,29 @@ def main():
             name = f"{mesh.name} ({len(mesh.triangles)} tris)"
 
         fb.clear((10, 10, 20))
-        draw_wireframe(fb, GRID_VERTS, GRID_EDGES, vp, (40, 60, 90), NEAR)
+        if MODES[mode] != "depth view":
+            draw_wireframe(fb, GRID_VERTS, GRID_EDGES, vp, (40, 60, 90), NEAR)
 
-        if mode == 0:
+        if MODES[mode] == "wireframe":
             for mesh, model in items:
                 draw_wireframe(fb, mesh.vertices, mesh.edges, vp @ model, (0, 255, 160), NEAR)
             stats = ""
         else:
-            drawn, culled = draw_meshes_filled(fb, items, vp, NEAR, cull, outline=(mode == 2))
-            stats = f" | drawn {drawn}, culled {culled}"
+            depth_mode = MODES[mode] == "depth view"
+            zbuf = use_zbuffer or depth_mode              # depth view needs the z-buffer
+            drawn, culled = draw_meshes_filled(
+                fb, items, vp, NEAR, cull,
+                outline=(MODES[mode] == "filled + outline"), use_zbuffer=zbuf)
+            if depth_mode:
+                depth_to_image(fb, NEAR, FAR, use_perspective)
+            stats = f" | {'z-buffer' if zbuf else 'painter'} | drawn {drawn}, culled {culled}"
 
         surf = pygame.surfarray.make_surface(fb.color)
         window.blit(pygame.transform.scale(surf, window.get_size()), (0, 0))
         proj_name = "Persp" if use_perspective else "Ortho"
         cull_name = "cull ON" if cull else "cull OFF"
         pygame.display.set_caption(
-            f"Stage 5 | {name} | {MODES[mode]} | {cull_name}{stats} | "
+            f"Stage 6 | {name} | {MODES[mode]}{stats} | {cull_name} | "
             f"{proj_name} | {clock.get_fps():.0f} FPS")
         pygame.display.flip()
 
