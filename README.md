@@ -17,8 +17,14 @@ python -m venv .venv
 
 | Key | Action |
 |---|---|
+| W / A / S / D | Move forward / left / back / right |
+| Q / E | Move down / up |
+| Shift | Move 3× faster |
+| Arrow keys | Look around (yaw and pitch) |
+| R | Reset camera |
 | P | Toggle perspective / orthographic projection |
 | O | Toggle the pyramid's transform order (spin in place / orbit) |
+| C | Save a screenshot to `screenshots/` |
 | Esc | Quit |
 
 ## Project structure
@@ -28,6 +34,7 @@ python -m venv .venv
 | `main.py` | Main loop, input handling, scene setup |
 | `math3d.py` | 4×4 matrices: translation, rotation, scaling, projection, viewport |
 | `renderer.py` | Framebuffer and rasterization algorithms (everything that writes pixels) |
+| `camera.py` | First-person fly camera: position, yaw, pitch, view matrix |
 | `devlog.md` | Development log: problems found and how they were solved |
 
 ---
@@ -112,8 +119,69 @@ screen_x = (x_ndc + 1) / 2 · width
 screen_y = (1 - y_ndc) / 2 · height      (flipped, because screen y grows downward)
 ```
 
-### Clipping (simplified)
-A point behind the camera has `w ≤ 0`, and dividing by it would flip it to the wrong side of the screen. Edges with an endpoint closer than the near plane are skipped. (Full clipping, which cuts the edge exactly at the near plane, is a possible extension.)
+### Clipping
+In this stage, edges with an endpoint behind the near plane were simply skipped. Stage 3 replaces this with proper clipping.
+
+---
+
+## Stage 3: An interactive camera and line clipping
+
+### The camera as an inverse transform
+A camera is just an object in the world with a position and an orientation. Here it is described by a position and two angles: **yaw** (turning left/right around the Y axis) and **pitch** (looking up/down around the X axis). The camera's own transform in the world is:
+
+```
+CameraWorld = T(position) · Ry(yaw) · Rx(pitch)
+```
+
+The graphics pipeline, however, always assumes the camera sits at the origin looking down −Z. So instead of moving the camera, we move the **whole world in the opposite direction**. The view matrix is the inverse of the camera's transform:
+
+```
+View = CameraWorld⁻¹ = Rx(−pitch) · Ry(−yaw) · T(−position)
+```
+
+The inverse of a product reverses the order, and the inverse of a rotation is a rotation by the negative angle. Moving the camera 1 unit to the right is exactly the same as moving everything else 1 unit to the left.
+
+### Moving relative to where you look
+Pressing W should move the camera *forward from its own point of view*, not along a fixed world axis. The forward and right directions are the camera's local axes rotated by the yaw:
+
+```
+forward = Ry(yaw) · (0, 0, −1) = (−sin yaw, 0, −cos yaw)
+right   = Ry(yaw) · (1, 0,  0) = ( cos yaw, 0, −sin yaw)
+```
+
+Pitch is clamped to ±89° so the camera cannot flip upside down (at exactly ±90° the yaw axis and the view axis line up and turning becomes ambiguous, a close relative of gimbal lock).
+
+### Frame-rate independent movement
+Movement is multiplied by `dt`, the time since the last frame in seconds. Speed is expressed in units per second, so the camera moves at the same real speed whether the renderer runs at 20 or 60 FPS.
+
+### Why clipping became necessary
+Once the camera can move, lines can pass behind it or extend far outside the screen. This caused two real problems:
+
+1. **Points behind the camera:** they have `w ≤ 0`. Dividing by a negative `w` flips them to the opposite side of the screen and draws lines that should not exist.
+2. **Huge off-screen lines:** a point just in front of the near plane projects to a coordinate like x = 1,000,000. Bresenham would then loop over a million pixels, almost all off-screen, and freeze the program.
+
+The floor grid (lines 20 units long that pass under and behind the camera) triggers both, so the renderer now clips in two steps.
+
+### Step 1: near-plane clipping in 3D (clip space)
+Before the perspective divide, each edge is tested against the plane `w = near`. If both endpoints are in front, it is kept. If both are behind, it is dropped. If it crosses the plane, the crossing point is found by linear interpolation:
+
+```
+t   = (near − w0) / (w1 − w0)
+hit = C0 + t · (C1 − C0)
+```
+
+and the part behind the camera is replaced by `hit`. Clipping in clip space (before dividing) is important, because the division is exactly what breaks for points behind the camera.
+
+### Step 2: Liang–Barsky clipping in 2D (screen space)
+After projection, each line is clipped to the screen rectangle before Bresenham runs. Liang–Barsky writes the line in parametric form:
+
+```
+P(u) = P0 + u · (P1 − P0),    0 ≤ u ≤ 1
+```
+
+Each of the four screen edges gives one inequality of the form `u · p_k ≤ q_k`. When `p_k < 0` the line is entering that boundary and `u = q_k / p_k` raises the lower bound `u_enter`; when `p_k > 0` the line is leaving and it lowers the upper bound `u_exit`. If `u_enter > u_exit` the line misses the screen entirely. Otherwise the visible part is `P(u_enter)` to `P(u_exit)`. It needs only four divisions per line and no repeated subdivision, which makes it more efficient than Cohen–Sutherland.
+
+**Result:** Bresenham now only ever walks over visible pixels, so a line that was 1,000,000 pixels long is reduced to at most a few hundred, and the program stays smooth anywhere in the scene.
 
 ---
 

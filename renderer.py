@@ -20,8 +20,39 @@ class Framebuffer:
             self.color[x, y] = rgb
 
 
+def clip_line_liang_barsky(x0, y0, x1, y1, xmin, ymin, xmax, ymax):
+    """Liang-Barsky line clipping against a rectangle.
+
+    Writes the segment as P(u) = P0 + u * (P1 - P0), u in [0, 1], and shrinks
+    [u_enter, u_exit] with one inequality per rectangle side.
+    Returns the clipped endpoints, or None if the line is fully outside.
+    """
+    dx, dy = x1 - x0, y1 - y0
+    p = (-dx, dx, -dy, dy)
+    q = (x0 - xmin, xmax - x0, y0 - ymin, ymax - y0)
+    u_enter, u_exit = 0.0, 1.0
+    for pi, qi in zip(p, q):
+        if pi == 0:                 # line parallel to this side
+            if qi < 0:              # ...and outside it
+                return None
+        else:
+            u = qi / pi
+            if pi < 0:              # entering the rectangle
+                u_enter = max(u_enter, u)
+            else:                   # leaving the rectangle
+                u_exit = min(u_exit, u)
+    if u_enter > u_exit:
+        return None
+    return (x0 + u_enter * dx, y0 + u_enter * dy,
+            x0 + u_exit * dx, y0 + u_exit * dy)
+
+
 def draw_line(fb, x0, y0, x1, y1, rgb):
-    """Bresenham's line algorithm (integer-only, works in all 8 octants)."""
+    """Clip the line to the screen, then rasterize it with Bresenham."""
+    clipped = clip_line_liang_barsky(x0, y0, x1, y1, 0, 0, fb.w - 1, fb.h - 1)
+    if clipped is None:
+        return
+    x0, y0, x1, y1 = clipped
     # Snap endpoints to the pixel grid first, otherwise the stop
     # condition may never be exactly true -> infinite loop.
     x0, y0 = int(round(x0)), int(round(y0))

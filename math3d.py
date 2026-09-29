@@ -86,3 +86,20 @@ def to_screen(clip, width, height):
     sx = (ndc[:, 0] + 1) * 0.5 * width
     sy = (1 - ndc[:, 1]) * 0.5 * height            # flip: screen y grows downward
     return np.stack([sx, sy, ndc[:, 2]], axis=1)
+
+
+def clip_segment_near(c0, c1, near):
+    """Clip a segment (two clip-space points) against the near plane w = near.
+
+    Points behind the camera have w <= 0 and would be flipped by the
+    perspective divide, so the part of the segment behind the near plane
+    is cut off. Returns (c0, c1) possibly shortened, or None if fully behind.
+    """
+    w0, w1 = c0[3], c1[3]
+    if w0 >= near and w1 >= near:
+        return c0, c1
+    if w0 < near and w1 < near:
+        return None
+    t = (near - w0) / (w1 - w0)          # where along the segment w == near
+    hit = c0 + t * (c1 - c0)
+    return (hit, c1) if w0 < near else (c0, hit)
