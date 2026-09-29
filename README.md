@@ -22,6 +22,8 @@ python -m venv .venv
 | Shift | Move 3× faster |
 | Arrow keys | Look around (yaw and pitch) |
 | R | Reset camera |
+| M | Switch model (shapes → Suzanne → teapot → Spot the cow) |
+| Space | Pause / resume the model rotation |
 | P | Toggle perspective / orthographic projection |
 | O | Toggle the pyramid's transform order (spin in place / orbit) |
 | C | Save a screenshot to `screenshots/` |
@@ -35,6 +37,8 @@ python -m venv .venv
 | `math3d.py` | 4×4 matrices: translation, rotation, scaling, projection, viewport |
 | `renderer.py` | Framebuffer and rasterization algorithms (everything that writes pixels) |
 | `camera.py` | First-person fly camera: position, yaw, pitch, view matrix |
+| `obj_loader.py` | Wavefront .obj loader: indexed mesh, triangulation, edge extraction |
+| `models/` | Test models: Suzanne, the Utah teapot, Spot the cow |
 | `devlog.md` | Development log: problems found and how they were solved |
 
 ---
@@ -185,4 +189,54 @@ Each of the four screen edges gives one inequality of the form `u · p_k ≤ q_k
 
 ---
 
-<!-- Later stages are added below -->
+## Stage 4: Loading real 3D models (graphics data)
+
+### Mesh representation: the indexed face set
+A 3D model is a surface made of polygons. The naive way to store it is a list of triangles, each with its own three copies of its corner coordinates. Since a typical vertex is shared by about six triangles, that repeats every coordinate about six times, and nothing records that two triangles actually touch.
+
+The renderer uses an **indexed face set** instead, the standard representation used by GPUs and most file formats:
+
+- `vertices`: an (N, 3) array. Each vertex position is stored **once**.
+- `triangles`: a (T, 3) array of integer **indices** into the vertex array.
+- `edges`: an (E, 2) array of unique edges, used for wireframe drawing.
+
+Besides saving memory, sharing vertices means a transform only has to be computed once per vertex, not once per triangle corner. The renderer takes advantage of this: all vertices are projected in a single matrix multiplication, and then every edge just looks up its two already-projected endpoints.
+
+### The Wavefront OBJ format
+OBJ is a plain-text format. The loader handles the lines that matter for geometry:
+
+```
+v  x y z          a vertex position
+f  1 2 3 4        a face, listing vertex indices (1-based)
+```
+
+Details the loader has to deal with, all of which appear in the three test models:
+
+- **Face corner formats:** a corner may be `v`, `v/vt`, `v//vn` or `v/vt/vn` (vertex / texture coordinate / normal). Only the first number, the vertex index, is used for now.
+- **1-based and negative indices:** OBJ counts from 1, so 1 is subtracted. Negative indices count backwards from the most recently defined vertex.
+- **Polygons with more than 3 corners:** Suzanne is made mostly of quads.
+
+### Triangulation
+The rasterizer (next stage) only works with triangles, because a triangle is always flat and always convex, so filling it has no special cases. Every polygon is split with a **fan** from its first corner: a quad `(a, b, c, d)` becomes `(a, b, c)` and `(a, c, d)`. A fan is correct for any convex polygon, which is what modeling tools export.
+
+### Edge extraction
+For the wireframe, edges are taken from the **original polygon outlines**, not the triangles, so quads are drawn without their internal diagonal (like Blender's wireframe view). Each edge is stored as `(min(a, b), max(a, b))` in a set, because the edge from a to b and the edge from b to a are the same line, and neighboring faces share it. Without this, every interior edge would be drawn twice.
+
+### Normalization
+Models come in arbitrary units and positions (the teapot is about 6 units wide and sits above the origin; Spot is under 2 units). Each model is centered on its bounding box and scaled so its largest side is 2, so every model fits in the same [−1, 1] box and the same camera setup works for all of them.
+
+### The test models
+
+| Model | Vertices | Triangles | Unique edges | Notes |
+|---|---|---|---|---|
+| Suzanne | 507 | 968 | 1,005 | Blender's mascot, mostly quads, `v//vn` corners |
+| Utah teapot | 3,644 | 6,320 | 9,998 | The classic computer graphics test model (1975), plain `v` corners |
+| Spot the cow | 2,930 | 5,856 | 8,784 | Uses `v/vt` corners (texture coordinates) |
+
+Models from Alec Jacobson's *common-3d-test-models* collection on GitHub.
+
+### Performance
+Projecting all vertices at once with numpy, and converting the result to plain Python lists before the per-edge loop, keeps even the teapot at an interactive frame rate. The remaining cost is Bresenham itself, which runs in pure Python one pixel at a time. This is exactly the work a GPU does in parallel hardware.
+
+---
+

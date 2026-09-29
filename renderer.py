@@ -75,3 +75,28 @@ def draw_line(fb, x0, y0, x1, y1, rgb):
         if e2 <= dx:
             err += dx
             y0 += sy
+
+
+def draw_wireframe(fb, vertices, edges, mvp, rgb, near):
+    """Project all vertices ONCE, then rasterize every edge.
+
+    Edges fully in front of the near plane (the common case) use the
+    already-projected points. Only edges crossing the near plane are clipped.
+    """
+    import math3d as m3   # local import keeps renderer independent of the math module
+
+    edges = np.asarray(edges)
+    clip = m3.transform_points(mvp, vertices)
+    screen = m3.to_screen(clip, fb.w, fb.h)
+    w = clip[:, 3]
+    front_a = w[edges[:, 0]] >= near
+    front_b = w[edges[:, 1]] >= near
+
+    pts = screen.tolist()                       # plain Python lists are faster to index
+    for a, b in edges[front_a & front_b].tolist():
+        draw_line(fb, pts[a][0], pts[a][1], pts[b][0], pts[b][1], rgb)
+
+    for a, b in edges[front_a ^ front_b].tolist():   # exactly one endpoint behind
+        seg = m3.clip_segment_near(clip[a], clip[b], near)
+        p0, p1 = m3.to_screen(np.array(seg), fb.w, fb.h)
+        draw_line(fb, p0[0], p0[1], p1[0], p1[1], rgb)

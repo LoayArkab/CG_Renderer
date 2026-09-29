@@ -21,3 +21,11 @@
 - Fix 1: near-plane clipping in clip space (cut each edge at w = near before the divide).
 - Fix 2: Liang-Barsky clipping of every line to the screen rectangle before Bresenham.
 - Screenshot key moved from S to C because S is now "move backward".
+
+## Stage 4: Loading OBJ models
+- Wrote an OBJ loader (obj_loader.py) that stores meshes as an indexed face set: each vertex once, faces as index lists.
+- Handles all face corner formats (v, v/vt, v//vn, v/vt/vn), 1-based and negative indices, and polygons with more than 3 corners.
+- Quads and polygons are triangulated with a fan; wireframe edges come from the original polygon outlines and are de-duplicated with a set.
+- Models are centered and scaled to fit [-1, 1] so every model works with the same camera.
+- Performance: projecting all vertices in one numpy multiplication instead of per edge keeps the teapot (6,320 triangles, ~10,000 edges) interactive.
+- Added M to switch models and Space to pause rotation.
