@@ -62,3 +62,6 @@
 - Added 2x2 supersampling anti-aliasing (key X): render at 640x480 into a second framebuffer, then average each 2x2 block (numpy reshape + mean).
 - Refactored the frame drawing into render_scene(fb, ...) so the same code can render into either framebuffer.
 - AA costs about 4x the per-pixel work, but less than 4x overall because per-triangle work stays the same.
+
+## Stage 9: Documentation
+- Finished the README: overview, gallery, features, pipeline diagram, per-stage explanations, performance, limitations, extensions, what I learned, credits.

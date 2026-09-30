@@ -1,19 +1,73 @@
 # Rasterization from Scratch: A 3D Software Renderer in Python
 
-## Overview
+A complete 3D rendering pipeline written from scratch, following the same path a GPU takes: 3D models are loaded from files, transformed with 4×4 matrices, projected, clipped, rasterized into pixels, depth-tested and lit. Pygame is used **only** to open a window and display an array of pixels; every pixel of the 3D image is computed by this project's own code.
 
-This project is a small 3D rendering engine written from scratch. Pygame is used **only** to open a window and show an array of pixels; every pixel in that array is computed by my own code. The project follows the path a GPU takes: 3D vertices are transformed with matrices, projected onto the screen, and rasterized into pixels.
+**Course:** Computer Graphics, mini project
+**Main topic:** Rasterization
+**Supporting topics:** geometric transformations and projection, mesh representation (graphics data), clipping, hidden surface removal, lighting and shading, anti-aliasing
 
-**Main course topic:** Rasterization.
-**Supporting topics:** geometric transformations and rotations, projection, mesh representation (graphics data), hidden surface removal, and shading.
+![The Utah teapot, Phong shading with anti-aliasing](screenshots/final_teapot_phong.png)
+
+## Gallery
+
+| | |
+|---|---|
+| ![Wireframe](screenshots/final_teapot_wireframe.png) | ![Filled with outlines](screenshots/final_suzanne_outline.png) |
+| **Wireframe:** Bresenham lines with 3D and 2D clipping | **Filled triangles:** edge-function rasterizer, each polygon outlined |
+| ![Painter's algorithm](screenshots/final_painter.png) | ![Z-buffer](screenshots/final_zbuffer.png) |
+| **Painter's algorithm:** fails where objects intersect | **Z-buffer:** the same frame, resolved per pixel |
+| ![Depth view](screenshots/final_cow_depth.png) | ![Shading comparison](screenshots/stage7_shading_comparison.png) |
+| **Depth view:** the z-buffer itself (near = white) | **Flat, Gouraud and Phong shading** |
+
+## Features
+
+Everything below is implemented by hand; no graphics library draws any part of the 3D image.
+
+| Area | Implemented |
+|---|---|
+| Line rasterization | Bresenham's algorithm, all 8 octants, integer arithmetic only |
+| Transformations | 4×4 homogeneous matrices: translation, rotation (X, Y, Z), scaling |
+| Projection | Perspective and orthographic, perspective divide, viewport transform |
+| Camera | First-person fly camera, view matrix as the inverse camera transform |
+| Clipping | Near-plane clipping in clip space; Liang–Barsky clipping to the screen |
+| Models | Wavefront OBJ loader, indexed face sets, fan triangulation, edge extraction |
+| Triangle rasterization | Edge functions / barycentric coordinates, pixel-center sampling |
+| Visibility | Back-face culling, painter's algorithm, z-buffer |
+| Lighting | Blinn-Phong: ambient, diffuse (Lambert), specular (half vector) |
+| Shading | Flat, Gouraud and Phong; perspective-correct interpolation |
+| Anti-aliasing | 2×2 supersampling (SSAA) |
+| Tools | Depth-buffer visualization, depth-correct outlines, on-screen display |
+
+## The pipeline
+
+```mermaid
+flowchart LR
+    A[OBJ file] --> B[Mesh<br/>vertices + triangles]
+    B --> C[Model · View · Projection<br/>4x4 matrices]
+    C --> D[Near-plane clipping]
+    D --> E[Divide by w<br/>+ viewport]
+    E --> F[Back-face culling]
+    F --> G[Rasterize triangles<br/>edge functions]
+    G --> H[Depth test<br/>z-buffer]
+    H --> I[Shading<br/>Blinn-Phong]
+    I --> J[Framebuffer]
+    J --> K[Optional 2x2<br/>SSAA resolve]
+    K --> L[Screen]
+```
 
 ## How to run
+
+Requires Python 3 with `numpy` and `pygame` (or the drop-in replacement `pygame-ce`).
 
 ```bash
 python -m venv .venv
 .venv\Scripts\python.exe -m pip install pygame-ce numpy     # Windows
 .venv\Scripts\python.exe main.py
 ```
+
+On macOS or Linux, use `.venv/bin/python` instead of `.venv\Scripts\python.exe`.
+
+### Controls
 
 | Key | Action |
 |---|---|
@@ -48,8 +102,13 @@ python -m venv .venv
 | `obj_loader.py` | Mesh class, Wavefront .obj loader, triangulation, built-in cube and pyramid |
 | `models/` | Test models: Suzanne, the Utah teapot, Spot the cow |
 | `devlog.md` | Development log: problems found and how they were solved |
+| `screenshots/` | Images used in this README |
+
+The work was done in stages, each adding one part of the pipeline and each committed separately to git. The commit history and `devlog.md` record the process, including the bugs found along the way and how they were fixed.
 
 ---
+
+# Implementation, stage by stage
 
 ## Stage 1: The framebuffer and Bresenham's line algorithm
 
@@ -464,6 +523,44 @@ A pixel that is half covered by an edge now gets a color halfway between the two
 | MSAA | Test coverage and depth at several points per pixel, but run the lighting once per pixel | Lower: only edges get extra work |
 | FXAA / post-process | Detect edges in the finished image and blur along them | Lowest, but can blur fine details |
 
+
+
 ---
 
-<!-- Later stages are added below -->
+# Results and discussion
+
+## Performance
+The renderer runs in pure Python with numpy, on the CPU, at an internal resolution of 320×240 (scaled up 3× for display). Approximate frame rates on a laptop (they depend on the machine and on how much of the screen the model covers):
+
+| Scene | Wireframe | Flat | Gouraud | Phong |
+|---|---|---|---|---|
+| Cube + pyramid (24 triangles) | 60 | 60 | 60 | 50–60 |
+| Suzanne (968 triangles) | 60 | 30 | 25–30 | 15 |
+| Teapot / Spot (~6,000 triangles) | 20–25 | 10 | 8 | 4–5 |
+
+The costs follow the structure of the pipeline. Work per **vertex** (matrix multiplication, normals, Gouraud lighting) is done for all vertices at once with numpy and is almost free. Work per **triangle** runs in a Python loop, so the teapot's 6,000 triangles dominate. Work per **pixel** is vectorized inside each triangle, which is why Phong shading and anti-aliasing cost less than their extra pixel work would suggest. A GPU runs all three levels in parallel hardware, which is exactly the gap between a few frames per second here and thousands of frames per second in a game.
+
+## Limitations
+- **Near-plane clipping of triangles is simplified:** a triangle with any corner behind the camera is dropped instead of being cut at the near plane (lines *are* clipped properly). Flying through a model makes some triangles close to the camera disappear early.
+- **One directional light, no shadows.** Surfaces facing the light are lit even if another object is between them and the light.
+- **No textures.** Spot's OBJ file includes texture coordinates, but they are not used yet.
+- **Speed:** a pure Python per-triangle loop limits large models to a few frames per second.
+
+## Possible extensions
+- **Full triangle clipping** against the near plane (Sutherland–Hodgman), producing one or two new triangles.
+- **Texture mapping:** load Spot's texture coordinates and sample an image, using the perspective-correct interpolation already built for Stage 7.
+- **Shadow mapping:** render the scene's depth from the light's point of view and compare against it, reusing the z-buffer code.
+- **Vertex welding:** merge duplicate vertices when loading, which would remove the seams on the teapot.
+- **Speed:** move the per-triangle loop to compiled code (e.g. numba), or batch small triangles together.
+
+## What I learned
+- **The pipeline is a chain of simple steps.** Each stage is a small, understandable idea (a matrix, a divide, a sign test, a comparison), and together they turn a text file of numbers into a lit 3D image.
+- **Homogeneous coordinates make it work.** Writing points as (x, y, z, 1) turns every transform, including translation and perspective, into a 4×4 matrix, and the whole chain into one matrix per object. The perspective effect is just one division by w.
+- **Order matters.** `Translate · Rotate` and `Rotate · Translate` produce completely different motions (spinning vs. orbiting), because matrix multiplication is not commutative.
+- **Correctness problems appear when things move.** Clipping was not needed until the camera could fly, and the painter's algorithm only visibly failed when two objects intersected. Each new feature exposed the limits of the previous one.
+- **Per-triangle vs. per-pixel decisions.** The same question gives better results when answered per pixel: the painter's algorithm vs. the z-buffer for visibility, and Gouraud vs. Phong for lighting. Per-pixel is always correct and always more expensive.
+- **Screen space is not 3D space.** After the perspective divide, positions on the screen are not evenly spaced in 3D. Depth survives this (NDC z is linear on screen), but colors and normals need perspective-correct interpolation.
+
+## Credits
+- Models from Alec Jacobson's *common-3d-test-models* collection: Suzanne (Blender Foundation), the Utah teapot (Martin Newell, 1975) and Spot (Keenan Crane).
+- Algorithms follow the classic descriptions: Bresenham (1965), Liang–Barsky (1984), Gouraud (1971), Phong (1975), Blinn (1977), and the edge-function rasterization approach of Pineda (1988).
