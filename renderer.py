@@ -287,3 +287,11 @@ def depth_to_image(fb, near, far, perspective=True):
     gray = (255 - 200 * t).astype(np.uint8)              # 255 (near) .. 55 (far)
     image[hit] = gray[:, None]
     fb.color[:] = image
+
+
+def downsample(src, dst, factor):
+    """Supersampling anti-aliasing (SSAA) resolve step:
+    every output pixel is the average of a factor x factor block of samples."""
+    w, h = dst.w, dst.h
+    blocks = src.color.reshape(w, factor, h, factor, 3).astype(np.float32)
+    dst.color[:] = blocks.mean(axis=(1, 3)).astype(np.uint8)

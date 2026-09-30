@@ -28,6 +28,8 @@ python -m venv .venv
 | Z | Hidden surface removal: z-buffer / painter's algorithm |
 | L | Shading: face colors / flat / Gouraud / Phong |
 | K | Make the light orbit around the scene (on / off) |
+| X | Anti-aliasing: 2×2 supersampling (on / off) |
+| H | Show / hide the help overlay |
 | B | Back-face culling on / off |
 | P | Toggle perspective / orthographic projection |
 | O | Toggle the pyramid's transform order (spin in place / orbit) |
@@ -430,6 +432,37 @@ This is applied to the Gouraud colors and to the Phong normals and positions. It
 
 ### Visible seams on the teapot
 The teapot shows a few sharp lines across its smooth body. They come from the model file itself: the teapot was built from separate Bézier patches, and the OBJ file repeats the vertices along patch boundaries instead of sharing them. The duplicated vertices each get a normal averaged only from their own side, so the normals do not match across the seam. Merging vertices with the same position before computing normals would remove them. The same mechanism is used on purpose in modeling tools, where duplicating vertices along an edge creates a deliberate **hard edge** (e.g. the edges of the cube, which Gouraud and Phong otherwise round off, since each cube corner averages three very different face normals).
+
+---
+
+## Stage 8: Interface and anti-aliasing
+
+### On-screen display
+All the information that used to be squeezed into the window title is now drawn on top of the image: the current model and its triangle count, render mode, shading, hidden surface method, culling, projection, anti-aliasing, the number of triangles drawn and culled, and the frame rate. A help panel lists every key and can be hidden with **H**.
+
+The text panels are drawn with pygame's font renderer on the final, upscaled window. They are the only pixels in the program not produced by the renderer, and they are drawn after the 3D image is finished, so they never touch the framebuffer or the z-buffer.
+
+### Anti-aliasing
+![Without and with anti-aliasing](screenshots/stage8_antialiasing_comparison.png)
+*Left: one sample per pixel. Right: 2×2 supersampling. Rendered by this project.*
+
+**Why aliasing happens.** The rasterizer tests one point, the pixel center, and each pixel is either fully inside a triangle or fully outside. But a triangle's edge usually crosses a pixel partway, so the true color is a mix of the two sides. Forcing a yes/no decision turns every slanted or curved edge into a staircase of jagged steps ("jaggies"), and thin details or small triangles can flicker or vanish as they move between pixel centers. In signal-processing terms, the screen samples a continuous image with a finite sampling rate, and edges contain details too fine for that rate to capture.
+
+**Supersampling (SSAA).** The simplest cure is to take more samples per pixel. With key **X**, the whole scene is rendered into a second framebuffer at twice the width and twice the height (640×480), and then each 2×2 block of samples is averaged into one final pixel:
+
+```
+final[x, y] = average of high_res[2x .. 2x+1, 2y .. 2y+1]
+```
+
+A pixel that is half covered by an edge now gets a color halfway between the two sides, so edges become smooth gradients instead of steps. Because everything is rendered at the higher resolution (edges, shading, specular highlights, and the floor grid lines) all of it is anti-aliased at once. The averaging step is done with a single numpy reshape and mean.
+
+**The cost.** Four times as many samples means roughly four times the per-pixel work (edge functions, depth tests and, in Phong mode, lighting). The per-triangle work stays the same, which is why the frame rate drops less than 4× in practice. This cost is why real GPUs rarely use plain SSAA and prefer cheaper methods:
+
+| Method | Idea | Cost |
+|---|---|---|
+| SSAA (used here) | Render everything at higher resolution, average down | Highest: all work × number of samples |
+| MSAA | Test coverage and depth at several points per pixel, but run the lighting once per pixel | Lower: only edges get extra work |
+| FXAA / post-process | Detect edges in the finished image and blur along them | Lowest, but can blur fine details |
 
 ---
 

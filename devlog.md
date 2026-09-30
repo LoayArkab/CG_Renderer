@@ -55,3 +55,10 @@
 - Changed the light direction to come more from the camera side; the first direction left most visible faces dark.
 - Noticed seams on the teapot: the OBJ duplicates vertices along patch borders, so normals don't match across them.
 - Phong is ~2x slower than Gouraud in pure Python (~4-5 FPS on the teapot).
+
+## Stage 8: Interface and anti-aliasing
+- Replaced the window-title info with an on-screen display (model, triangles, mode, shading, z-buffer/painter, culling, projection, AA, FPS) and a help panel (key H).
+- The HUD is drawn with pygame fonts on the final window, after rendering, so it never touches the framebuffer or z-buffer.
+- Added 2x2 supersampling anti-aliasing (key X): render at 640x480 into a second framebuffer, then average each 2x2 block (numpy reshape + mean).
+- Refactored the frame drawing into render_scene(fb, ...) so the same code can render into either framebuffer.
+- AA costs about 4x the per-pixel work, but less than 4x overall because per-triangle work stays the same.
